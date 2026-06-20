@@ -1065,10 +1065,10 @@ OUTPUT RULE: final message = ONLY a raw JSON array. No commentary, no markdown f
 
 ${eventSelectionBlock(lookaheadHours)}
 
-Once the event is chosen, use Google Search to confirm/expand its real significance (meaning, what it commemorates, what devotees observe/which rituals are performed). If the event is genuinely tied to one specific deity (e.g. Shivaratri → Shiva, Ekadashi → Vishnu, Ganesh Chaturthi → Ganesha), research that deity's name and its significance for this event. If the event is NOT deity-specific (e.g. Amavasya, Purnima with no single named-deity focus), do NOT force one — instead describe the general devotional/ritual focus appropriate to the event (e.g. lunar deities and ancestors for Amavasya, fasting and remembrance for a vrat day) as the god_name/god_significance content. Ground every fact in real tradition — never invent an event, date, or significance.
+Once the event is chosen, use Google Search to confirm/expand its real significance (meaning, what it commemorates), its key timings (e.g. tithi start/end times, puja muhurat, vrat/fasting window — in IST), and the 2–3 key rituals devotees observe. If the event is genuinely tied to one specific deity (e.g. Shivaratri → Shiva, Ekadashi → Vishnu, Ganesh Chaturthi → Ganesha), research that deity's name and its significance for this event. If the event is NOT deity-specific (e.g. Amavasya, Purnima with no single named-deity focus), do NOT force one — instead describe the general devotional/ritual focus appropriate to the event (e.g. lunar deities and ancestors for Amavasya, fasting and remembrance for a vrat day) as the god_name/god_significance content. Ground every fact in real tradition — never invent an event, date, timing, ritual, or significance.
 
 CONCEPTS: Produce EXACTLY 2 image concepts, both anchored to the SAME chosen event:
-- IMAGE 1 — "Vedic style": built from the event name, day, date, and significance.
+- IMAGE 1 — "Vedic style": built from the event name, day & date, all relevant timings, and key rituals.
 - IMAGE 2 — "Cinematic style": built from the event name and its deity/devotional focus + that focus's significance.
 
 FIELDS (same chosen event across both images):
@@ -1076,10 +1076,12 @@ FIELDS (same chosen event across both images):
 - day: the real day of the week for this event (e.g. "Saturday").
 - date: the real calendar date for this event (e.g. "21 June 2026").
 - significance: 1–2 sentences, factual, sourced from real tradition — what the event means and why it matters.
+- timings: the real key timings for this event, in IST, as a short factual phrase (e.g. tithi start/end, puja muhurat, vrat/fasting window — "Ekadashi tithi begins 11:08 PM on 20 Jun, ends 8:42 PM on 21 Jun; Parana 6:05–8:30 AM on 22 Jun").
+- key_rituals: a short comma-separated list of 2–3 real, factual rituals/observances devotees perform for this event (e.g. "fasting, evening puja, lighting diyas").
 - god_name: the deity associated with this event if deity-specific, otherwise a short phrase naming the general devotional/ritual focus.
 - god_significance: 1 sentence on why this deity/focus matters for this specific event.
 - image_prompt:
-  - For IMAGE 1, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Vedic style image (1:1) with warm ivory background, " + event_name + ", " + day + " " + date + ", " + significance.
+  - For IMAGE 1, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Vedic style image (1:1) with warm ivory background, " + event_name + ", " + day + " " + date + ", " + timings + ", " + key_rituals.
   - For IMAGE 2, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Cinematic style image (1:1) with warm ivory background, " + event_name + ", " + god_name + ", " + god_significance.
 - caption: a clear, respectful, devotional/inspirational caption (1–2 sentences) naming the real event. Light tasteful emojis only (om, lotus, diya). End with EXACTLY 4 relevant hashtags (e.g. #SanatanDharma + 3 event-specific).
 - best_posting_time: a single best posting time suggestion in IST (e.g. "7:30 PM IST").
@@ -1088,7 +1090,7 @@ VIRALITY: every concept must land in 3 seconds, use highly visual (not generic) 
 
 JSON VALIDITY: if any field's text includes a quoted phrase (e.g. a mantra, scripture line, or quoted saying), you MUST escape the double-quote characters inside it with a backslash (\\") so the JSON stays valid — never leave a raw, unescaped " inside a string value.
 
-Return ONLY a JSON array of 2 objects, IN ORDER (Image 1 = Vedic style, Image 2 = Cinematic style), keys: "event_name","day","date","significance","god_name","god_significance","image_prompt","caption","best_posting_time".`;
+Return ONLY a JSON array of 2 objects, IN ORDER (Image 1 = Vedic style, Image 2 = Cinematic style), keys: "event_name","day","date","significance","timings","key_rituals","god_name","god_significance","image_prompt","caption","best_posting_time".`;
 }
 
 /* ============================================================
@@ -1356,6 +1358,16 @@ function buildCard(kind, it, i){
       const metaRow = document.createElement("div"); metaRow.className="card-meta";
       metaRow.textContent = metaBits.join(" · ");
       body.appendChild(metaRow);
+    }
+    if(it.timings){
+      const tim = document.createElement("p"); tim.className="card-sig card-rituals";
+      tim.textContent = `Timings: ${it.timings}`;
+      body.appendChild(tim);
+    }
+    if(it.key_rituals){
+      const kr = document.createElement("p"); kr.className="card-sig card-rituals";
+      kr.textContent = `Key rituals: ${it.key_rituals}`;
+      body.appendChild(kr);
     }
     if(it.significance){
       const sig = document.createElement("p"); sig.className="card-sig";
