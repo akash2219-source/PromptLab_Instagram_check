@@ -389,6 +389,19 @@
   }
   .file-warning-close:hover{filter:brightness(.95)}
 
+  .model-meta-row{display:flex;align-items:center;gap:8px;margin-top:6px}
+  .model-updated{font-size:11px;color:var(--muted-2);font-family:"IBM Plex Mono";flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .model-updated b{color:var(--muted)}
+  .btn-refresh-models{
+    flex:none;height:28px;padding:0 10px;border-radius:8px;font-size:11px;font-weight:600;
+    background:var(--panel-2);border:1px solid var(--line);color:var(--muted);
+    display:inline-flex;align-items:center;gap:5px;transition:.15s ease;white-space:nowrap;
+  }
+  .btn-refresh-models:hover{color:var(--text);border-color:var(--muted-2)}
+  .btn-refresh-models:disabled{opacity:.45;cursor:not-allowed}
+  .btn-refresh-models .rspin{width:11px;height:11px;border-radius:50%;border:1.5px solid rgba(255,255,255,.2);border-top-color:var(--muted);animation:spin .7s linear infinite;flex:none}
+  select optgroup{color:var(--muted-2);font-size:11px}
+
   footer{padding:26px 0 40px;border-top:1px solid var(--line-soft);color:var(--muted-2);font-size:12px;text-align:center}
   footer b{color:var(--muted)}
 
@@ -614,12 +627,22 @@
       <div class="fld">
         <label>Generation model</label>
         <select class="sel" id="setModel">
-          <option value="gemini-2.5-flash">gemini-2.5-flash (recommended · ~250–1,500/day free)</option>
-          <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (highest free quota · ~1,000/day)</option>
-          <option value="gemini-2.0-flash">gemini-2.0-flash (fast · 1M TPM)</option>
-          <option value="gemini-2.5-pro">gemini-2.5-pro (paid key only — free tier ≈ 0/day)</option>
+          <optgroup label="Free tier">
+            <option value="gemini-2.5-flash">2.5 Flash — best price-performance (recommended)</option>
+            <option value="gemini-2.5-flash-lite">2.5 Flash Lite — fastest / budget</option>
+            <option value="gemini-3.1-flash-lite">3.1 Flash Lite — frontier-class / budget (GA)</option>
+          </optgroup>
+          <optgroup label="Paid">
+            <option value="gemini-3.5-flash">3.5 Flash — most intelligent Flash (GA)</option>
+            <option value="gemini-3.1-pro-preview">3.1 Pro Preview — advanced intelligence</option>
+            <option value="gemini-2.5-pro">2.5 Pro — deep reasoning</option>
+          </optgroup>
         </select>
-        <div class="hint">⚠ On a free key, stick to a <b>Flash</b> model or you'll hit 429 almost immediately. Same key/quota powers both tabs.</div>
+        <div class="model-meta-row">
+          <span class="model-updated" id="modelUpdatedLabel">Model list: built-in defaults (Jun 2026)</span>
+          <button class="btn-refresh-models" id="refreshModelsBtn" title="Refresh model list from Gemini API">↻ Refresh</button>
+        </div>
+        <div class="hint">⚠ On a free key, stick to <b>2.5 Flash</b> or <b>Flash Lite</b> models. gemini-2.0-flash is shut down (Jun 2026). Same key/quota powers both tabs. Hit ↻ Refresh to load the live model list.</div>
       </div>
       <div class="fld">
         <label>Live search <span class="hint" style="margin-left:auto">shared · both tabs</span></label>
@@ -748,13 +771,177 @@ function saveSettings(){
   toast("Settings saved", "ok");
   closeSettings();
 }
-function setModelUI(){ document.getElementById("chipModel").textContent = cfg.model.replace("gemini-",""); }
+function setModelUI(){ document.getElementById("chipModel").textContent = cleanModelName(cfg.model); }
 function refreshChips(){
   document.getElementById("modelPill").classList.toggle("on", !!cfg.gem);
 }
 function setWindow(v,btn){ cfg.window=v; document.querySelectorAll("#segWindow button").forEach(b=>b.classList.remove("active")); btn.classList.add("active"); }
 function setLookahead(v,btn){ cfg.lookahead=v; document.querySelectorAll("#segLookahead button").forEach(b=>b.classList.remove("active")); btn.classList.add("active"); }
 function setSearch(v,btn){ cfg.useSearch=v; document.querySelectorAll("#segSearch button").forEach(b=>b.classList.remove("active")); btn.classList.add("active"); }
+
+/* ============================================================
+   MODEL LIST — auto-refresh from Gemini API, 7-day TTL cache
+   ============================================================ */
+const LS_MODELS   = "promptlab_model_cache";
+const MODEL_TTL   = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
+
+// Updated June 2026 — gemini-2.0-flash shut down 1 Jun 2026
+const FALLBACK_MODELS = [
+  { id:"gemini-2.5-flash",       tier:"free" },  // Stable — best price-performance (recommended)
+  { id:"gemini-2.5-flash-lite",  tier:"free" },  // Stable — fastest / budget
+  { id:"gemini-3.1-flash-lite",  tier:"free" },  // GA — frontier-class / budget
+  { id:"gemini-3.5-flash",       tier:"paid" },  // GA — most intelligent Flash
+  { id:"gemini-3.1-pro-preview", tier:"paid" },  // Preview — advanced intelligence
+  { id:"gemini-2.5-pro",         tier:"paid" },  // Stable — deep reasoning
+];
+
+function cleanModelName(id){
+  // "gemini-2.5-flash-lite" → "2.5 Flash Lite"
+  // "gemini-2.5-pro-preview-06-05" → "2.5 Pro Preview 06 05"
+  return id
+    .replace(/^gemini-/i, "")          // strip leading "gemini-"
+    .replace(/-/g, " ")                // hyphens → spaces
+    .replace(/\b([a-z])/g, c => c.toUpperCase()); // capitalise each word
+}
+
+function classifyModel(id){
+  const low = id.toLowerCase();
+  if(low.includes("ultra"))      return "paid";
+  if(low.includes("pro"))        return "paid";
+  if(low.includes("flash"))      return "free";
+  return "other";
+}
+
+
+function buildModelSelect(models, fetchedAt){
+  const sel = document.getElementById("setModel");
+  const current = sel.value || cfg.model;
+
+  // Build grouped structure
+  const groups = { free:[], paid:[], other:[] };
+  models.forEach(m => {
+    const tier = m.tier || classifyModel(m.id);
+    (groups[tier] || groups.other).push(m.id);
+  });
+
+  sel.innerHTML = "";
+
+  const groupDefs = [
+    { key:"free", label:"Free tier" },
+    { key:"paid", label:"Paid"      },
+    { key:"other",label:"Other"     },
+  ];
+
+  groupDefs.forEach(({ key, label }) => {
+    const ids = groups[key];
+    if(!ids || !ids.length) return;
+    const og = document.createElement("optgroup");
+    og.label = label;
+    ids.forEach(id => {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = cleanModelName(id);
+      og.appendChild(opt);
+    });
+    sel.appendChild(og);
+  });
+
+  // Restore saved model; fall back to first free option then first available
+  const allIds = models.map(m => m.id);
+  sel.value = allIds.includes(current) ? current : (groups.free[0] || allIds[0] || "");
+
+  // Update last-updated label
+  const lbl = document.getElementById("modelUpdatedLabel");
+  if(fetchedAt){
+    const d = new Date(fetchedAt);
+    const ds = d.toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"});
+    lbl.innerHTML = `Model list updated: <b>${ds}</b> · ${models.length} models`;
+  } else {
+    lbl.textContent = "Model list: built-in defaults (Jun 2026)";
+  }
+}
+
+async function fetchModelList(isManual){
+  const btn = document.getElementById("refreshModelsBtn");
+  const lbl = document.getElementById("modelUpdatedLabel");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="rspin"></span> Fetching…';
+  if(isManual) lbl.textContent = "Fetching model list…";
+
+  try{
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cfg.gem)}&pageSize=100`;
+    let res;
+    try{
+      res = await fetch(url);
+    }catch(netErr){
+      throw new Error(`Network error — check your connection (${netErr.message})`);
+    }
+
+    if(!res.ok){
+      let detail = "";
+      try{ const j = await res.json(); detail = j?.error?.message || ""; }catch(e){ try{ detail = await res.text(); }catch(e){} }
+      if(res.status === 400 || res.status === 403) throw new Error(`Invalid or unauthorised API key (${res.status})`);
+      if(res.status === 429) throw new Error(`Quota exceeded — try again later (429)`);
+      throw new Error(`Gemini API ${res.status}: ${detail.slice(0,100)}`);
+    }
+
+    let j;
+    try{ j = await res.json(); }catch(e){ throw new Error("Gemini returned non-JSON — unexpected response format"); }
+
+    const raw = j.models || [];
+    const models = raw
+      .filter(m => (m.supportedGenerationMethods||[]).includes("generateContent"))
+      .filter(m => /^gemini/i.test((m.name||"").replace("models/","")))
+      .map(m => ({
+        id: (m.name||"").replace("models/",""),
+        tier: classifyModel((m.name||"").replace("models/",""))
+      }));
+
+    if(!models.length) throw new Error("API returned no generateContent-capable Gemini models — key may lack access");
+
+    const now = Date.now();
+    // Cache write — isolated so a storage error never kills the dropdown update
+    try{
+      localStorage.setItem(LS_MODELS, JSON.stringify({ models, fetchedAt: now }));
+    }catch(storageErr){
+      if(isManual) log(`Model cache not saved (storage error: ${storageErr.message}) — list will revert on next reload`, "warn");
+    }
+
+    buildModelSelect(models, now);
+    if(isManual) toast(`Model list refreshed — ${models.length} models found ✓`, "ok");
+
+  }catch(err){
+    // Try to fall back to any existing cache entry
+    let cached = null;
+    try{ cached = readJSON(LS_MODELS, null); }catch(e){}
+    const hasCacheEntry = cached && Array.isArray(cached.models) && cached.models.length > 0;
+
+    if(hasCacheEntry){
+      buildModelSelect(cached.models, cached.fetchedAt);
+      if(isManual) toast(`Refresh failed: ${err.message} — showing cached list`, "err");
+    } else {
+      buildModelSelect(FALLBACK_MODELS, null);
+      if(isManual) toast(`Refresh failed: ${err.message} — showing built-in defaults`, "err");
+    }
+
+    log(`Model list refresh error: ${err.message}`, "err");
+  }finally{
+    btn.disabled = false;
+    btn.innerHTML = "↻ Refresh";
+  }
+}
+
+function initModelList(){
+  const cached = readJSON(LS_MODELS, null);
+  if(cached && Array.isArray(cached.models) && cached.models.length){
+    buildModelSelect(cached.models, cached.fetchedAt);
+    const age = Date.now() - (cached.fetchedAt || 0);
+    if(age < MODEL_TTL) return; // still fresh — no fetch needed
+  } else {
+    buildModelSelect(FALLBACK_MODELS, null); // show built-in defaults immediately
+  }
+  if(cfg.gem) fetchModelList(false); // auto-fetch in background if key is present
+}
 
 /* ============================================================
    TOP-LEVEL TABS
@@ -1445,7 +1632,8 @@ function eraseAll(){
   if(!confirm("Erase your saved Gemini key and all preferences from this browser? This also clears current results and logs. This cannot be undone.")) return;
   try{
     localStorage.removeItem(LS); localStorage.removeItem(LS_CONSOLE);
-    localStorage.removeItem(LS_LANE); localStorage.removeItem(LS_GROUPS); localStorage.removeItem(LS_TAB);
+    localStorage.removeItem(LS_LANE); localStorage.removeItem(LS_GROUPS);
+    localStorage.removeItem(LS_TAB); localStorage.removeItem(LS_MODELS);
   }catch(e){}
   Object.assign(cfg,{
     gem:"", model:"gemini-2.5-flash", window:24, useSearch:1,
@@ -1453,7 +1641,7 @@ function eraseAll(){
     lookahead:72
   });
   document.getElementById("setGem").value="";
-  document.getElementById("setModel").value="gemini-2.5-flash";
+  buildModelSelect(FALLBACK_MODELS, null);
   document.getElementById("setRegion").value="Karnataka";
   document.querySelectorAll("#segWindow button").forEach(b=>b.classList.toggle("active", b.dataset.v==="24"));
   document.querySelectorAll("#segLookahead button").forEach(b=>b.classList.toggle("active", b.dataset.v==="72"));
@@ -1482,6 +1670,13 @@ function wireStaticButtons(){
   document.getElementById("eraseAllBtn").addEventListener("click", eraseAll);
   document.getElementById("toggleGemPw").addEventListener("click", function(){ togglePw("setGem", this); });
 
+  document.getElementById("setModel").addEventListener("change", function(){
+    document.getElementById("chipModel").textContent = cleanModelName(this.value);
+  });
+  document.getElementById("refreshModelsBtn").addEventListener("click", ()=>{
+    if(!cfg.gem){ toast("Enter your Gemini API key first","err"); openSettings(); return; }
+    fetchModelList(true);
+  });
   document.getElementById("runMemes").addEventListener("click", ()=>runCrew("press"));
   document.getElementById("runImage").addEventListener("click", ()=>runCrew("divine"));
   document.getElementById("runVideo").addEventListener("click", ()=>runCrew("video"));
@@ -1566,6 +1761,7 @@ function init(){
   wireSegmentedControls();
 
   loadSettings();
+  initModelList();
   initTab();
   initGroupStates();
   initConsoleState();
