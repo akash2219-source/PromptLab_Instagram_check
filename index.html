@@ -1113,34 +1113,37 @@ function toast(msg, kind=""){
 /* ============================================================
    GEMINI + JSON HELPERS
    ============================================================ */
-let _lastGemStart = 0;
-const MIN_GAP_MS = 4500;
-const BACKOFFS = [18000, 32000, 50000];
-// Two-hop fallback chain: on rate-limit, tries these models in order (skips selected model)
+// Tightened backoffs: RPM resets in ~60s so 6s first retry usually clears it.
+// RPD (daily cap) is detected and never retried — no point waiting.
+const BACKOFFS = [6000, 15000, 30000];
+
+// Two-hop fallback chain on rate-limit (skips whichever is already the primary)
 const FALLBACK_CHAIN = ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite"];
 
-async function throttleGate(signal){
-  const wait = _lastGemStart + MIN_GAP_MS - Date.now();
-  if(wait > 0) await sleep(wait, signal);
-  _lastGemStart = Date.now();
-}
+// Right-sized output token budgets per engine — avoids padding toward 8k
+const MAX_TOKENS = { press:3500, divine:2500, video:2500 };
 
-async function callGemini(prompt, useSearch, modelOverride, signal){
+async function callGemini(prompt, useSearch, modelOverride, signal, kind){
   bumpCalls();
-  const primary = modelOverride || cfg.model;
+  // Auto-route to Flash-Lite when search is off: 2× free RPM, fastest for pure JSON
+  const autoModel = (!useSearch && !modelOverride) ? "gemini-2.5-flash-lite" : null;
+  const primary = modelOverride || autoModel || cfg.model;
+  if(autoModel && autoModel !== cfg.model){
+    log(`Search off → auto-routing to ${autoModel} for speed`, "sys");
+  }
   try{
-    return await rawGemini(prompt, useSearch, primary, signal);
+    return await rawGemini(prompt, useSearch, primary, signal, kind);
   }catch(err){
-    if(err.name === "AbortError") throw err; // propagate stop immediately
-    if(err && err.isRateLimit){
+    if(err.name === "AbortError") throw err;
+    if(err && err.isRateLimit && !err.isDailyCapHit){
       for(const fallback of FALLBACK_CHAIN){
         if(fallback === primary) continue;
         log(`${primary} rate-limited — trying fallback: ${fallback}…`, "warn");
         try{
-          return await rawGemini(prompt, useSearch, fallback, signal);
+          return await rawGemini(prompt, useSearch, fallback, signal, kind);
         }catch(fbErr){
           if(fbErr.name === "AbortError") throw fbErr;
-          if(!fbErr.isRateLimit) throw fbErr; // non-rate-limit error → bubble up
+          if(!fbErr.isRateLimit) throw fbErr;
           log(`${fallback} also rate-limited — trying next fallback…`, "warn");
         }
       }
@@ -1149,11 +1152,12 @@ async function callGemini(prompt, useSearch, modelOverride, signal){
   }
 }
 
-async function rawGemini(prompt, useSearch, model, signal){
+async function rawGemini(prompt, useSearch, model, signal, kind){
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cfg.gem)}`;
+  const outputTokens = MAX_TOKENS[kind] || 3500;
   const body = {
     contents:[{ role:"user", parts:[{ text:prompt }] }],
-    generationConfig:{ temperature: useSearch?0.85:1.0, maxOutputTokens:8192, topP:0.95 }
+    generationConfig:{ temperature: useSearch?0.85:1.0, maxOutputTokens:outputTokens, topP:0.95 }
   };
   if(useSearch){
     body.tools = [{ google_search:{} }];
@@ -1164,7 +1168,6 @@ async function rawGemini(prompt, useSearch, model, signal){
   const maxRetries = BACKOFFS.length;
   for(let attempt=0; ; attempt++){
     if(signal?.aborted) throw new DOMException("Aborted","AbortError");
-    await throttleGate(signal);
     let res;
     try{
       res = await fetch(url,{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body), signal });
@@ -1172,7 +1175,7 @@ async function rawGemini(prompt, useSearch, model, signal){
       if(netErr.name === "AbortError") throw netErr;
       if(attempt < maxRetries){
         const w = BACKOFFS[attempt];
-        log(`Network hiccup reaching Gemini — retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
+        log(`Network hiccup — retrying in ${Math.round(w/1000)}s (${attempt+1}/${maxRetries})…`, "warn");
         await sleep(w, signal); continue;
       }
       throw new Error("Network error reaching Gemini — check your connection.");
@@ -1191,7 +1194,7 @@ async function rawGemini(prompt, useSearch, model, signal){
       const retryableFinish = ["RECITATION","OTHER","FINISH_REASON_UNSPECIFIED",""].includes(reason) && !cand?.content;
       if(retryableFinish && attempt < maxRetries){
         const w = BACKOFFS[attempt];
-        log(`Gemini returned empty (finishReason: ${reason||"none"}) — retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
+        log(`Gemini returned empty (${reason||"no reason"}) — retrying in ${Math.round(w/1000)}s…`, "warn");
         await sleep(w, signal); continue;
       }
 
@@ -1199,38 +1202,46 @@ async function rawGemini(prompt, useSearch, model, signal){
       if(reason==="MAX_TOKENS"){
         if(attempt < maxRetries){
           const w = BACKOFFS[attempt];
-          log(`Output was cut off (MAX_TOKENS) — raising limit and retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
-          body.generationConfig.maxOutputTokens = 65536;
+          log(`Output cut off (MAX_TOKENS) — bumping limit, retrying in ${Math.round(w/1000)}s…`, "warn");
+          body.generationConfig.maxOutputTokens = 8192;
           await sleep(w, signal); continue;
         }
       }
 
       const text = (cand?.content?.parts||[]).map(p=>p.text||"").join("");
       if(!text.trim()){
-        throw new Error("Gemini returned an empty response after all retries. Try again or switch to a different model in Settings.");
+        throw new Error("Gemini returned an empty response. Try again or switch model in Settings.");
       }
       return text;
     }
 
     let raw=""; try{ raw = await res.text(); }catch(e){}
-    let detail="", retryMs=0;
+    let detail="", retryMs=0, isDailyCapHit=false;
     try{
       const j = JSON.parse(raw);
       detail = j.error?.message || "";
+      // Detect daily cap (RPD) — these never recover with retries, stop immediately
+      isDailyCapHit = /quota.*day|daily.*quota|per.*day|exceed.*daily/i.test(detail);
       const ri = (j.error?.details||[]).find(d=>/RetryInfo/i.test(d["@type"]||""));
       if(ri?.retryDelay){ const s=parseFloat(ri.retryDelay); if(!isNaN(s)) retryMs = s*1000; }
     }catch(e){ detail = raw; }
 
+    if(res.status===429 && isDailyCapHit){
+      const e = new Error(`Daily quota hit on ${model} — resets midnight PT. Switch model or try tomorrow.`);
+      e.isRateLimit = true; e.isDailyCapHit = true; throw e;
+    }
+
     const retryable = (res.status===429 || res.status===500 || res.status===503);
     if(retryable && attempt < maxRetries){
-      const w = Math.max(retryMs, BACKOFFS[attempt]);
-      log(`${model} ${res.status===429?"rate limit":"busy ("+res.status+")"} — pausing ${Math.round(w/1000)}s, then retry ${attempt+1}/${maxRetries}…`, "warn");
+      // Respect server-suggested delay but cap at 30s; otherwise use our tighter backoff
+      const w = retryMs > 0 ? Math.min(retryMs, 30000) : BACKOFFS[attempt];
+      log(`${model} ${res.status===429?"RPM limit — pausing":"busy ("+res.status+") — waiting"} ${Math.round(w/1000)}s, retry ${attempt+1}/${maxRetries}…`, "warn");
       await sleep(w, signal); continue;
     }
 
     if(res.status===400 && /API key/i.test(detail)) throw new Error("Invalid Gemini API key.");
     if(res.status===429){
-      const e = new Error(`${model} rate limit reached after retries — likely the daily cap. Switch to a Flash model or use another key.`);
+      const e = new Error(`${model} rate limit — try Flash Lite or wait a minute.`);
       e.isRateLimit = true; throw e;
     }
     throw new Error(`Gemini ${res.status}: ${(detail||"request failed").slice(0,160)}`);
@@ -1241,124 +1252,97 @@ async function rawGemini(prompt, useSearch, model, signal){
    ============================================================ */
 function pressGenPrompt(){
   const today = new Date().toLocaleDateString("en-IN",{weekday:"long",year:"numeric",month:"long",day:"numeric",timeZone:"Asia/Kolkata"});
-  return `You are a multi-agent ${esc(cfg.region)} MEME crew covering 3 categories. Today is ${today} (IST).
+  return `${esc(cfg.region)} meme content generator. Today: ${today} IST.
 
-FIXED INPUT VARIABLE: Region: ${esc(cfg.region)}
-
-STEP 1 — GROUND IT: Use Google Search to find what is genuinely trending in ${esc(cfg.region).toUpperCase()} in the LAST ${cfg.window} HOURS (Indian Standard Time), across these 3 separate categories:
+Search Google for trending ${esc(cfg.region)} news in the LAST ${cfg.window} HOURS across 3 categories:
 A) POLITICS — political news, statements, controversies.
-B) BREAKING NEWS (NON-POLITICAL) — any other major regional news: accidents, civic issues, weather, sports, business, crime, public events — anything EXCEPT politics.
-C) KANNADA FILM INDUSTRY — Sandalwood news: releases, box office, casting, awards, controversies, celebrity statements.
-Read each story's HEADLINE and a short SUMMARY before deciding. Use only real, current moments.
+B) BREAKING NEWS (non-political) — civic, weather, sports, business, crime, events.
+C) KANNADA FILM — Sandalwood: releases, box office, casting, awards, controversies.
 
-STEP 2 — Produce EXACTLY 2 distinct meme concepts PER CATEGORY (6 total: 2 Politics + 2 Breaking News + 2 Kannada Film). For each concept, run these agents:
-1) MOMENT HUNTER — pick the EXACT news moment (a specific quote, facial expression, awkward reaction, or surprising turn) — never a vague topic like "elections".
-2) ANGLE FINDER — the comedic/relatable angle: irony, contrast, overpromising, or surprise.
-3) SENTIMENT MINER + CAPTION STYLIST — a short on-image tagline/punchline in the voice of the public / top comments, and a witty, self-contained caption, highly relatable to public sentiment.
+Produce EXACTLY 2 meme concepts per category (6 total). For each pick:
+- The EXACT news moment (specific quote, reaction, U-turn) — never a vague topic.
+- The comedic angle: irony, contrast, overpromising, or surprise.
+- A short on-image punchline (voice of public/top comments) + a witty caption.
 
-VIRALITY RULES (apply to every concept): 3-second clarity (instant understanding), minimal text/maximum impact, strong exaggeration + irony, highly relatable to public sentiment, lean on trending context wherever possible.
+Virality: 3-second clarity, minimal text, strong exaggeration + irony, relatable to local sentiment.
 
-OUTPUT RULES:
-- "category": EXACTLY one of "Political", "Breaking News", "Kannada Film" — matching which category this concept belongs to.
-- "headline": the REAL news headline (concise, factual, as reported).
-- "summary": a clear 1–2 sentence plain-English recap of what actually happened — neutral and factual, so anyone instantly gets the context.
-- "punchline": the on-image tagline (3–8 words), or "" if the image needs no text.
+OUTPUT FIELDS:
+- "category": exactly "Political", "Breaking News", or "Kannada Film".
+- "headline": real news headline, concise and factual.
+- "summary": 1–2 sentence neutral recap so anyone gets the context.
+- "punchline": 3–8 word on-image tagline, or "" if none needed.
 - "image_prompt":
-  - If category is "Political": MUST be EXACTLY this concatenation, nothing else added: "Generate an 4K, Meme Style Image, 1:1 ratio, " + punchline + ", " + summary.
-  - If category is "Breaking News" or "Kannada Film": MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Memes style Image (1:1 ratio), " + punchline + ", " + summary.
-- "caption": a CLEAR, self-contained witty/satirical social caption (a full sentence, NOT cryptic fragments) that names the real event/person so it makes sense on its own. Light emojis. End with EXACTLY 4 relevant hashtags.
+  - Political: "Generate an 4K, Meme Style Image, 1:1 ratio, " + punchline + ", " + summary.
+  - Breaking News / Kannada Film: "Generate 4k Memes style Image (1:1 ratio), " + punchline + ", " + summary.
+- "caption": self-contained witty caption naming the real event/person. Light emojis. End with EXACTLY 4 hashtags.
 
-JSON VALIDITY: if any field's text includes a quoted phrase (e.g. someone's exact quote), you MUST escape the double-quote characters inside it with a backslash (\\") so the JSON stays valid — never leave a raw, unescaped " inside a string value.
-
-Return ONLY a JSON array of 6 objects, GROUPED BY CATEGORY in this order (2 Political, then 2 Breaking News, then 2 Kannada Film), no markdown, no commentary, with keys:
+JSON rule: escape any double-quote inside a string value with \\".
+Return ONLY a raw JSON array of 6 objects (2 Political, 2 Breaking News, 2 Kannada Film), keys:
 "category","headline","summary","image_prompt","punchline","caption".`;
 }
 
 /* ============================================================
    PROMPT BUILDERS — VEDIC ENGINE (IMAGE AGENT)
    ============================================================ */
-const KARNATAKA_CALENDAR_NOTE = `Regional note: weigh Karnataka / South Indian almanac conventions (Amanta lunar month system, as used in Karnataka/South India) alongside the Purnimanta system used in North India — if a date or tithi differs between the two traditions, prefer the Amanta/South Indian reading and note it briefly in the significance if relevant.`;
+const KARNATAKA_CALENDAR_NOTE = `Karnataka/South India uses the Amanta lunar system — prefer that reading if it differs from North Indian Purnimanta, and note it briefly in the significance.`;
 
 function eventSelectionBlock(lookaheadHours){
   const hrs = lookaheadHours || 72;
-  return `EVENT SELECTION LOGIC — follow these two options IN ORDER, using Google Search to research and ground every fact in real tradition (never invent an event, tithi, nakshatra, significance, or ritual):
-
-OPTION 1 (primary): Search for candidate Hindu calendar events (Amavasya, Ekadashi, Purnima, Sankashti Chaturthi, named festivals, etc.) occurring within the next ${hrs} hours (IST) from today. Pick the TOP 1 upcoming event in that window if one stands out as culturally significant.
-
-OPTION 2 (fallback — use ONLY if Option 1 finds nothing culturally significant enough within the window, or keeps surfacing the same event repeatedly with nothing new to say): Instead search "as per the Vedic Hindu calendar, what is special today (current day and date)" and build today's concepts around whatever you find for TODAY specifically — the current tithi, nakshatra, vrat/observance, or any minor significance of the day itself. Phrase the resulting event_name naturally and appropriately for what you find (it does not need to name a major festival) — there is no fixed wording required, just make it factual and grounded in today's actual Panchang.
-
+  return `EVENT SELECTION — use Google Search, ground every fact in real tradition, never invent:
+OPTION 1: Search for significant Hindu calendar events (Amavasya, Ekadashi, Purnima, Sankashti, named festivals) in the next ${hrs} hours IST. Pick the top 1.
+OPTION 2 (only if Option 1 yields nothing significant): Search what is Vedically special TODAY and build around today's tithi/nakshatra/vrat — phrase event_name naturally for whatever you find.
 ${KARNATAKA_CALENDAR_NOTE}`;
 }
 
 function imageGenPrompt(lookaheadHours){
-  return `You are the IMAGE GENERATION AGENT of a Vedic Content Generation Engine, producing devotional IMAGE concepts for a single Instagram post (1:1).
-
-OUTPUT RULE: final message = ONLY a raw JSON array. No commentary, no markdown fences. Do internal research first; output JSON last.
+  return `Vedic Instagram image generator. Output: ONLY a raw JSON array, no commentary, no markdown.
 
 ${eventSelectionBlock(lookaheadHours)}
 
-Once the event is chosen, use Google Search to confirm/expand its real significance (meaning, what it commemorates), its key timings (e.g. tithi start/end times, puja muhurat, vrat/fasting window — in IST), and the 2–3 key rituals devotees observe. If the event is genuinely tied to one specific deity (e.g. Shivaratri → Shiva, Ekadashi → Vishnu, Ganesh Chaturthi → Ganesha), research that deity's name and its significance for this event. If the event is NOT deity-specific (e.g. Amavasya, Purnima with no single named-deity focus), do NOT force one — instead describe the general devotional/ritual focus appropriate to the event (e.g. lunar deities and ancestors for Amavasya, fasting and remembrance for a vrat day) as the god_name/god_significance content. Ground every fact in real tradition — never invent an event, date, timing, ritual, or significance.
+After choosing the event, search to confirm its real significance, key IST timings (tithi start/end, muhurat, vrat window), and 2–3 key rituals. Research the associated deity if the event is deity-specific (Shivaratri→Shiva, Ekadashi→Vishnu, etc.); if not deity-specific, describe the general devotional focus instead — never force a deity. Never invent any fact.
 
-CONCEPTS: Produce EXACTLY 2 image concepts, both anchored to the SAME chosen event:
-- IMAGE 1 — "Cinematic style": built from the event name and its deity/devotional focus + that focus's significance.
-- IMAGE 2 — "Vedic style": built from the event name, day & date, all relevant timings, and key rituals.
+Produce EXACTLY 2 image concepts for the SAME event:
+- IMAGE 1 "Cinematic style": event name + deity/devotional focus + its significance.
+- IMAGE 2 "Vedic style": event name + day/date + timings + key rituals.
 
-FIELDS (same chosen event across both images):
-- event_name: the real event/observance name (e.g. "Vaikuntha Ekadashi", "Kartik Amavasya").
-- day: the real day of the week for this event (e.g. "Saturday").
-- date: the real calendar date for this event (e.g. "21 June 2026").
-- significance: 1–2 sentences, factual, sourced from real tradition — what the event means and why it matters.
-- timings: the real key timings for this event, in IST, as a short factual phrase (e.g. tithi start/end, puja muhurat, vrat/fasting window — "Ekadashi tithi begins 11:08 PM on 20 Jun, ends 8:42 PM on 21 Jun; Parana 6:05–8:30 AM on 22 Jun").
-- key_rituals: a short comma-separated list of 2–3 real, factual rituals/observances devotees perform for this event (e.g. "fasting, evening puja, lighting diyas").
-- god_name: the deity associated with this event if deity-specific, otherwise a short phrase naming the general devotional/ritual focus.
-- god_significance: 1 sentence on why this deity/focus matters for this specific event.
+FIELDS (both images share the same event):
+- event_name, day, date, significance (1–2 factual sentences), timings (short IST phrase), key_rituals (2–3 items, comma-separated), god_name (deity or devotional focus), god_significance (1 sentence).
 - image_prompt:
-  - For IMAGE 1, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Cinematic style image (1:1) with warm ivory background, " + event_name + ", " + god_name + ", " + god_significance.
-  - For IMAGE 2, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Vedic style image (1:1) with warm ivory background, " + event_name + ", " + day + " " + date + ", " + timings + ", " + key_rituals.
-- caption: a clear, respectful, devotional/inspirational caption (1–2 sentences) naming the real event. Light tasteful emojis only (om, lotus, diya). End with EXACTLY 4 relevant hashtags (e.g. #SanatanDharma + 3 event-specific).
-- best_posting_time: a single best posting time suggestion in IST (e.g. "7:30 PM IST").
+  - Image 1: "Generate 4k Cinematic style image (1:1) with warm ivory background, " + event_name + ", " + god_name + ", " + god_significance.
+  - Image 2: "Generate 4k Vedic style image (1:1) with warm ivory background, " + event_name + ", " + day + " " + date + ", " + timings + ", " + key_rituals.
+- caption: respectful devotional caption (1–2 sentences), real event name, light emojis (om/lotus/diya), EXACTLY 4 hashtags (#SanatanDharma + 3 event-specific).
+- best_posting_time: single IST suggestion (e.g. "7:30 PM IST").
 
-VIRALITY: every concept must land in 3 seconds, use highly visual (not generic) language, carry a cinematic + spiritual tone, and trigger curiosity/emotional connection. Never satirical or irreverent.
-
-JSON VALIDITY: if any field's text includes a quoted phrase (e.g. a mantra, scripture line, or quoted saying), you MUST escape the double-quote characters inside it with a backslash (\\") so the JSON stays valid — never leave a raw, unescaped " inside a string value.
-
-Return ONLY a JSON array of 2 objects, IN ORDER (Image 1 = Cinematic style, Image 2 = Vedic style), keys: "event_name","day","date","significance","timings","key_rituals","god_name","god_significance","image_prompt","caption","best_posting_time".`;
+JSON rule: escape any " inside a string value with \\".
+Return ONLY a JSON array of 2 objects (Image 1 = Cinematic, Image 2 = Vedic), keys:
+"event_name","day","date","significance","timings","key_rituals","god_name","god_significance","image_prompt","caption","best_posting_time".`;
 }
 
 /* ============================================================
    PROMPT BUILDERS — VEDIC ENGINE (VIDEO AGENT)
    ============================================================ */
 function videoGenPrompt(lookaheadHours){
-  return `You are the VIDEO GENERATION AGENT of a Vedic Content Generation Engine, producing 2 short devotional VIDEO concepts (9:16, 10 seconds each, for Instagram Reels).
-
-OUTPUT RULE: final message = ONLY a raw JSON array. No commentary, no markdown fences. Do internal research/citing first; output JSON last.
+  return `Vedic Instagram video generator. Output: ONLY a raw JSON array, no commentary, no markdown.
 
 ${eventSelectionBlock(lookaheadHours)}
 
-Once the event is chosen, use Google Search to confirm/expand its real significance and the rituals devotees observe. If the event is genuinely tied to one specific deity, research that deity's name and its significance for this event. If the event is NOT deity-specific, do NOT force one — describe the general devotional/ritual focus instead. Ground every fact in real tradition — never invent an event, date, or significance.
+After choosing the event, search to confirm its real significance and rituals. Research the associated deity if event is deity-specific; otherwise describe the general devotional focus. Never invent any fact.
 
-CONCEPTS: Produce EXACTLY 2 videos, both anchored to the SAME chosen event:
-- VIDEO 1 — "Vedic style": built from the event name, day, date, significance, and camera angles/motion of your own choosing — pick whatever angles and moves best suit the event's mood, no fixed phrasing required.
-- VIDEO 2 — "Cinematic style": built from the event name and its deity/devotional focus + that focus's significance, plus camera angle/motion of your own choosing.
+Produce EXACTLY 2 video concepts for the SAME event:
+- VIDEO 1 "Vedic style": event name + day/date + significance + freely chosen camera angles/motion.
+- VIDEO 2 "Cinematic style": event name + deity/devotional focus + significance + freely chosen camera angle/motion.
 
-FIELDS (same chosen event across both videos):
-- event_name: the real event/observance name (identical across both videos).
-- day: the real day of the week for this event (identical across both videos).
-- date: the real calendar date for this event (identical across both videos).
-- significance: 1–2 sentences, factual, sourced from real tradition (identical across both videos).
-- god_name: the deity associated with this event if deity-specific, otherwise a short phrase naming the general devotional/ritual focus (identical across both videos).
-- god_significance: 1 sentence on why this deity/focus matters for this event (identical across both videos).
+FIELDS (same event across both videos):
+- event_name, day, date, significance (1–2 factual sentences), god_name, god_significance (1 sentence).
 - video_prompt:
-  - For VIDEO 1, MUST start with EXACTLY this concatenation: "Generate Vedic style video (9:16), 10 Sec, " + event_name + ", " + day + " " + date + ", " + significance + ", " — then continue as ONE cohesive cinematic description in comma-separated descriptive phrases (no full sentences, no "generate/create" wording) weaving in your own choice of camera angles/motion, lighting, and scene progression across the 10s.
-  - For VIDEO 2, MUST start with EXACTLY this concatenation: "Generate Cinematic style video (9:16), 10 Sec, " + event_name + ", " + god_name + ", " + god_significance + ", " — then continue the same way, weaving in your own choice of camera angle/motion, lighting, and scene progression across the 10s.
-- caption: a respectful devotional/inspirational caption (1–2 sentences) naming the real event. Light tasteful emojis only (om, lotus, diya). End with EXACTLY 4 relevant hashtags (e.g. #SanatanDharma + 3 event-specific).
-- best_posting_time: a single best posting time suggestion in IST (e.g. "7:30 PM IST").
+  - Video 1: start with "Generate Vedic style video (9:16), 10 Sec, " + event_name + ", " + day + " " + date + ", " + significance + ", " then add comma-separated cinematic description with camera motion, lighting, scene progression across 10s.
+  - Video 2: start with "Generate Cinematic style video (9:16), 10 Sec, " + event_name + ", " + god_name + ", " + god_significance + ", " then add comma-separated cinematic description with camera motion, lighting, scene progression.
+- caption: respectful devotional caption (1–2 sentences), real event name, light emojis, EXACTLY 4 hashtags.
+- best_posting_time: single IST suggestion.
 
-VIRALITY: highly visual language, no generic phrasing, cinematic + spiritual tone throughout. No repetition between the two videos — each must feel unique even though unified by the same event.
-
-JSON VALIDITY: if any field's text includes a quoted phrase (e.g. a mantra, scripture line, or quoted saying), you MUST escape the double-quote characters inside it with a backslash (\\") so the JSON stays valid — never leave a raw, unescaped " inside a string value.
-
-Return ONLY a JSON array of 2 objects, IN ORDER (Video 1 = Vedic style, Video 2 = Cinematic style), keys: "event_name","day","date","significance","god_name","god_significance","video_prompt","caption","best_posting_time".`;
+JSON rule: escape any " inside a string value with \\".
+Return ONLY a JSON array of 2 objects (Video 1 = Vedic, Video 2 = Cinematic), keys:
+"event_name","day","date","significance","god_name","god_significance","video_prompt","caption","best_posting_time".`;
 }
 
 /**
@@ -1502,7 +1486,7 @@ async function runCrew(kind){
         : `Scout: live search OFF — drafting from model knowledge (quota-saving mode)…`, kind);
     }
     const lookaheadHours = (kind==="divine" || kind==="video") ? cfg.lookahead : null;
-    const genText = await callGemini(meta.genPrompt(lookaheadHours), grounded, null, ctrl.signal);
+    const genText = await callGemini(meta.genPrompt(lookaheadHours), grounded, null, ctrl.signal, kind);
     let items = extractArray(genText).slice(0, meta.maxItems || 3);
     log(`Crew drafted ${items.length} prompt(s).`, kind);
 
