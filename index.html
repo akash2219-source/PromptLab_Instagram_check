@@ -177,6 +177,14 @@
     transition:background .15s ease;
   }
   .btn-danger:hover{background:rgba(255,107,129,.16)}
+  .btn-stop{
+    height:48px;padding:0 20px;border-radius:13px;font-weight:700;font-size:14px;letter-spacing:.01em;
+    display:none;align-items:center;gap:9px;
+    background:rgba(255,107,129,.10);border:1px solid rgba(255,107,129,.45);color:var(--flag);
+    transition:background .15s ease, opacity .15s ease;
+  }
+  .btn-stop.visible{display:inline-flex}
+  .btn-stop:hover{background:rgba(255,107,129,.22)}
   .btn .spin{width:15px;height:15px;border-radius:50%;border:2px solid rgba(26,18,32,.35);border-top-color:#1a1220;animation:spin .7s linear infinite}
   .btn-ghost .spin{border-color:rgba(255,255,255,.25);border-top-color:#fff}
   @keyframes spin{to{transform:rotate(360deg)}}
@@ -461,6 +469,7 @@
           <button class="btn btn-primary" id="runMemes">
             <span class="bi">🗞️</span><span class="bt">Run Memes Crew</span>
           </button>
+          <button class="btn btn-stop" id="stopMemes" aria-label="Stop run">🛑 Stop</button>
           <button class="btn btn-ghost btn-clear" id="clearBtn-memes" title="Clear logs, results &amp; counters"><span class="bi">🧹</span><span class="bt">Clear</span></button>
         </div>
       </div>
@@ -521,9 +530,11 @@
           <button class="btn btn-divine" id="runImage">
             <span class="bi">🕉️</span><span class="bt">Run Vedic Image Agent</span>
           </button>
+          <button class="btn btn-stop" id="stopImage" aria-label="Stop image run">🛑 Stop</button>
           <button class="btn btn-video" id="runVideo">
             <span class="bi">🎞️</span><span class="bt">Run Vedic Video Agent</span>
           </button>
+          <button class="btn btn-stop" id="stopVideo" aria-label="Stop video run">🛑 Stop</button>
           <button class="btn btn-ghost btn-clear" id="clearBtn-divine" title="Clear logs, results &amp; counters"><span class="bi">🧹</span><span class="bt">Clear</span></button>
         </div>
       </div>
@@ -627,13 +638,16 @@
       <div class="fld">
         <label>Generation model</label>
         <select class="sel" id="setModel">
-          <optgroup label="Free tier">
-            <option value="gemini-2.5-flash">2.5 Flash — best price-performance (recommended)</option>
-            <option value="gemini-2.5-flash-lite">2.5 Flash Lite — fastest / budget</option>
-            <option value="gemini-3.1-flash-lite">3.1 Flash Lite — frontier-class / budget (GA)</option>
+          <optgroup label="Gemini 3 · Free">
+            <option value="gemini-3.1-flash-lite">3.1 Flash Lite — GA · 30 RPM · best free throughput</option>
+            <option value="gemini-3.5-flash">3.5 Flash — GA · 15 RPM · most intelligent free</option>
+            <option value="gemini-3-flash-preview">3 Flash Preview — Preview · 10 RPM</option>
           </optgroup>
-          <optgroup label="Paid">
-            <option value="gemini-3.5-flash">3.5 Flash — most intelligent Flash (GA)</option>
+          <optgroup label="Gemini 2.5 · Free">
+            <option value="gemini-2.5-flash">2.5 Flash — Stable · 15 RPM · recommended ✓</option>
+            <option value="gemini-2.5-flash-lite">2.5 Flash Lite — Stable · 30 RPM · budget</option>
+          </optgroup>
+          <optgroup label="Paid only">
             <option value="gemini-3.1-pro-preview">3.1 Pro Preview — advanced intelligence</option>
             <option value="gemini-2.5-pro">2.5 Pro — deep reasoning</option>
           </optgroup>
@@ -642,7 +656,7 @@
           <span class="model-updated" id="modelUpdatedLabel">Model list: built-in defaults (Jun 2026)</span>
           <button class="btn-refresh-models" id="refreshModelsBtn" title="Refresh model list from Gemini API">↻ Refresh</button>
         </div>
-        <div class="hint">⚠ On a free key, stick to <b>2.5 Flash</b> or <b>Flash Lite</b> models. gemini-2.0-flash is shut down (Jun 2026). Same key/quota powers both tabs. Hit ↻ Refresh to load the live model list.</div>
+        <div class="hint">⚠ Free key: use Flash or Flash Lite. Pro models are paid-only since Apr 2026. On rate limit, app auto-retries on fallback models. Same key/quota powers both tabs.</div>
       </div>
       <div class="fld">
         <label>Live search <span class="hint" style="margin-left:auto">shared · both tabs</span></label>
@@ -785,15 +799,19 @@ function setSearch(v,btn){ cfg.useSearch=v; document.querySelectorAll("#segSearc
 const LS_MODELS   = "promptlab_model_cache";
 const MODEL_TTL   = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
 
-// Updated June 2026 — gemini-2.0-flash shut down 1 Jun 2026
+// Updated June 2026 — grouped by generation; gemini-2.0-flash shut down 1 Jun 2026; Pro paid-only since Apr 2026
 const FALLBACK_MODELS = [
-  { id:"gemini-2.5-flash",       tier:"free" },  // Stable — best price-performance (recommended)
-  { id:"gemini-2.5-flash-lite",  tier:"free" },  // Stable — fastest / budget
-  { id:"gemini-3.1-flash-lite",  tier:"free" },  // GA — frontier-class / budget
-  { id:"gemini-3.5-flash",       tier:"paid" },  // GA — most intelligent Flash
-  { id:"gemini-3.1-pro-preview", tier:"paid" },  // Preview — advanced intelligence
-  { id:"gemini-2.5-pro",         tier:"paid" },  // Stable — deep reasoning
+  { id:"gemini-3.1-flash-lite",  tier:"free" },  // GA — 30 RPM, best free throughput
+  { id:"gemini-3.5-flash",       tier:"free" },  // GA — 15 RPM, most intelligent free
+  { id:"gemini-3-flash-preview", tier:"free" },  // Preview — 10 RPM
+  { id:"gemini-2.5-flash",       tier:"free" },  // Stable — 15 RPM (default ✓)
+  { id:"gemini-2.5-flash-lite",  tier:"free" },  // Stable — 30 RPM, budget
+  { id:"gemini-3.1-pro-preview", tier:"paid" },  // Preview — paid only (Apr 2026+)
+  { id:"gemini-2.5-pro",         tier:"paid" },  // Stable — paid only (Apr 2026+)
 ];
+
+// Per-run AbortControllers — one per kind (press / divine / video)
+const abortCtrl = { press:null, divine:null, video:null };
 
 function cleanModelName(id){
   // "gemini-2.5-flash-lite" → "2.5 Flash Lite"
@@ -1085,28 +1103,40 @@ function toast(msg, kind=""){
 let _lastGemStart = 0;
 const MIN_GAP_MS = 4500;
 const BACKOFFS = [18000, 32000, 50000];
-const FALLBACK_MODEL = "gemini-2.5-flash-lite";
+// Two-hop fallback chain: on rate-limit, tries these models in order (skips selected model)
+const FALLBACK_CHAIN = ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite"];
+
 async function throttleGate(){
   const wait = _lastGemStart + MIN_GAP_MS - Date.now();
   if(wait > 0) await sleep(wait);
   _lastGemStart = Date.now();
 }
 
-async function callGemini(prompt, useSearch, modelOverride){
+async function callGemini(prompt, useSearch, modelOverride, signal){
   bumpCalls();
   const primary = modelOverride || cfg.model;
   try{
-    return await rawGemini(prompt, useSearch, primary);
+    return await rawGemini(prompt, useSearch, primary, signal);
   }catch(err){
-    if(err && err.isRateLimit && primary !== FALLBACK_MODEL){
-      log(`${primary} is rate-limited — falling back to ${FALLBACK_MODEL} for this call…`, "warn");
-      return await rawGemini(prompt, useSearch, FALLBACK_MODEL);
+    if(err.name === "AbortError") throw err; // propagate stop immediately
+    if(err && err.isRateLimit){
+      for(const fallback of FALLBACK_CHAIN){
+        if(fallback === primary) continue;
+        log(`${primary} rate-limited — trying fallback: ${fallback}…`, "warn");
+        try{
+          return await rawGemini(prompt, useSearch, fallback, signal);
+        }catch(fbErr){
+          if(fbErr.name === "AbortError") throw fbErr;
+          if(!fbErr.isRateLimit) throw fbErr; // non-rate-limit error → bubble up
+          log(`${fallback} also rate-limited — trying next fallback…`, "warn");
+        }
+      }
     }
     throw err;
   }
 }
 
-async function rawGemini(prompt, useSearch, model){
+async function rawGemini(prompt, useSearch, model, signal){
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cfg.gem)}`;
   const body = {
     contents:[{ role:"user", parts:[{ text:prompt }] }],
@@ -1120,15 +1150,19 @@ async function rawGemini(prompt, useSearch, model){
 
   const maxRetries = BACKOFFS.length;
   for(let attempt=0; ; attempt++){
+    if(signal?.aborted) throw new DOMException("Aborted","AbortError");
     await throttleGate();
     let res;
     try{
-      res = await fetch(url,{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+      res = await fetch(url,{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body), signal });
     }catch(netErr){
+      if(netErr.name === "AbortError") throw netErr;
       if(attempt < maxRetries){
         const w = BACKOFFS[attempt];
         log(`Network hiccup reaching Gemini — retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
-        await sleep(w); continue;
+        await sleep(w);
+        if(signal?.aborted) throw new DOMException("Aborted","AbortError");
+        continue;
       }
       throw new Error("Network error reaching Gemini — check your connection.");
     }
@@ -1147,7 +1181,9 @@ async function rawGemini(prompt, useSearch, model){
       if(retryableFinish && attempt < maxRetries){
         const w = BACKOFFS[attempt];
         log(`Gemini returned empty (finishReason: ${reason||"none"}) — retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
-        await sleep(w); continue;
+        await sleep(w);
+        if(signal?.aborted) throw new DOMException("Aborted","AbortError");
+        continue;
       }
 
       if(reason==="SAFETY") throw new Error("Gemini blocked this for safety — try again or rephrase the topic.");
@@ -1156,7 +1192,9 @@ async function rawGemini(prompt, useSearch, model){
           const w = BACKOFFS[attempt];
           log(`Output was cut off (MAX_TOKENS) — raising limit and retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
           body.generationConfig.maxOutputTokens = 65536;
-          await sleep(w); continue;
+          await sleep(w);
+          if(signal?.aborted) throw new DOMException("Aborted","AbortError");
+          continue;
         }
       }
 
@@ -1180,7 +1218,9 @@ async function rawGemini(prompt, useSearch, model){
     if(retryable && attempt < maxRetries){
       const w = Math.max(retryMs, BACKOFFS[attempt]);
       log(`${model} ${res.status===429?"rate limit":"busy ("+res.status+")"} — pausing ${Math.round(w/1000)}s, then retry ${attempt+1}/${maxRetries}…`, "warn");
-      await sleep(w); continue;
+      await sleep(w);
+      if(signal?.aborted) throw new DOMException("Aborted","AbortError");
+      continue;
     }
 
     if(res.status===400 && /API key/i.test(detail)) throw new Error("Invalid Gemini API key.");
@@ -1255,8 +1295,8 @@ ${eventSelectionBlock(lookaheadHours)}
 Once the event is chosen, use Google Search to confirm/expand its real significance (meaning, what it commemorates), its key timings (e.g. tithi start/end times, puja muhurat, vrat/fasting window — in IST), and the 2–3 key rituals devotees observe. If the event is genuinely tied to one specific deity (e.g. Shivaratri → Shiva, Ekadashi → Vishnu, Ganesh Chaturthi → Ganesha), research that deity's name and its significance for this event. If the event is NOT deity-specific (e.g. Amavasya, Purnima with no single named-deity focus), do NOT force one — instead describe the general devotional/ritual focus appropriate to the event (e.g. lunar deities and ancestors for Amavasya, fasting and remembrance for a vrat day) as the god_name/god_significance content. Ground every fact in real tradition — never invent an event, date, timing, ritual, or significance.
 
 CONCEPTS: Produce EXACTLY 2 image concepts, both anchored to the SAME chosen event:
-- IMAGE 1 — "Vedic style": built from the event name, day & date, all relevant timings, and key rituals.
-- IMAGE 2 — "Cinematic style": built from the event name and its deity/devotional focus + that focus's significance.
+- IMAGE 1 — "Cinematic style": built from the event name and its deity/devotional focus + that focus's significance.
+- IMAGE 2 — "Vedic style": built from the event name, day & date, all relevant timings, and key rituals.
 
 FIELDS (same chosen event across both images):
 - event_name: the real event/observance name (e.g. "Vaikuntha Ekadashi", "Kartik Amavasya").
@@ -1268,8 +1308,8 @@ FIELDS (same chosen event across both images):
 - god_name: the deity associated with this event if deity-specific, otherwise a short phrase naming the general devotional/ritual focus.
 - god_significance: 1 sentence on why this deity/focus matters for this specific event.
 - image_prompt:
-  - For IMAGE 1, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Vedic style image (1:1) with warm ivory background, " + event_name + ", " + day + " " + date + ", " + timings + ", " + key_rituals.
-  - For IMAGE 2, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Cinematic style image (1:1) with warm ivory background, " + event_name + ", " + god_name + ", " + god_significance.
+  - For IMAGE 1, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Cinematic style image (1:1) with warm ivory background, " + event_name + ", " + god_name + ", " + god_significance.
+  - For IMAGE 2, MUST be EXACTLY this concatenation, nothing else added: "Generate 4k Vedic style image (1:1) with warm ivory background, " + event_name + ", " + day + " " + date + ", " + timings + ", " + key_rituals.
 - caption: a clear, respectful, devotional/inspirational caption (1–2 sentences) naming the real event. Light tasteful emojis only (om, lotus, diya). End with EXACTLY 4 relevant hashtags (e.g. #SanatanDharma + 3 event-specific).
 - best_posting_time: a single best posting time suggestion in IST (e.g. "7:30 PM IST").
 
@@ -1277,7 +1317,7 @@ VIRALITY: every concept must land in 3 seconds, use highly visual (not generic) 
 
 JSON VALIDITY: if any field's text includes a quoted phrase (e.g. a mantra, scripture line, or quoted saying), you MUST escape the double-quote characters inside it with a backslash (\\") so the JSON stays valid — never leave a raw, unescaped " inside a string value.
 
-Return ONLY a JSON array of 2 objects, IN ORDER (Image 1 = Vedic style, Image 2 = Cinematic style), keys: "event_name","day","date","significance","timings","key_rituals","god_name","god_significance","image_prompt","caption","best_posting_time".`;
+Return ONLY a JSON array of 2 objects, IN ORDER (Image 1 = Cinematic style, Image 2 = Vedic style), keys: "event_name","day","date","significance","timings","key_rituals","god_name","god_significance","image_prompt","caption","best_posting_time".`;
 }
 
 /* ============================================================
@@ -1410,12 +1450,18 @@ function busyFlag(kind, val){
   if(kind==="divine"){ if(val!==undefined) busyDivine=val; return busyDivine; }
   if(kind==="video") { if(val!==undefined) busyVideo=val; return busyVideo; }
 }
+function stopBtnId(kind){ return kind==="press"?"stopMemes":kind==="divine"?"stopImage":"stopVideo"; }
 function setBusy(kind, b){
   busyFlag(kind, b);
   const meta = KIND_META[kind];
   document.getElementById(meta.runBtn).disabled = b;
+  const sb = document.getElementById(stopBtnId(kind));
+  if(sb) sb.classList.toggle("visible", b);
   if(kind==="press"){ document.getElementById("clearBtn-memes").disabled = b; }
   else { document.getElementById("clearBtn-divine").disabled = (busyDivine || busyVideo); }
+}
+function stopRun(kind){
+  if(abortCtrl[kind]){ abortCtrl[kind].abort(); abortCtrl[kind]=null; }
 }
 function spinOn(id){
   const btn=document.getElementById(id);
@@ -1436,6 +1482,9 @@ async function runCrew(kind){
   showSkeletons(kind);
   log(`Crew — starting…`, kind);
 
+  const ctrl = new AbortController();
+  abortCtrl[kind] = ctrl;
+
   try{
     const grounded = !!cfg.useSearch;
     if(kind==="press"){
@@ -1448,7 +1497,7 @@ async function runCrew(kind){
         : `Scout: live search OFF — drafting from model knowledge (quota-saving mode)…`, kind);
     }
     const lookaheadHours = (kind==="divine" || kind==="video") ? cfg.lookahead : null;
-    const genText = await callGemini(meta.genPrompt(lookaheadHours), grounded);
+    const genText = await callGemini(meta.genPrompt(lookaheadHours), grounded, null, ctrl.signal);
     let items = extractArray(genText).slice(0, meta.maxItems || 3);
     log(`Crew drafted ${items.length} prompt(s).`, kind);
 
@@ -1457,10 +1506,16 @@ async function runCrew(kind){
     log(`Prompts ready on screen.`, "ok");
 
   }catch(err){
-    log(err.message||String(err), "err");
-    renderError(kind, err.message||String(err));
-    toast(err.message||"Something went wrong", "err");
+    if(err.name === "AbortError"){
+      log("Run stopped by user.", "sys");
+      resetLane(kind);
+    } else {
+      log(err.message||String(err), "err");
+      renderError(kind, err.message||String(err));
+      toast(err.message||"Something went wrong", "err");
+    }
   }finally{
+    abortCtrl[kind] = null;
     spinOff(meta.runBtn, meta.icon);
     setBusy(kind, false);
   }
@@ -1504,7 +1559,7 @@ function renderCards(kind){
   setCount(kind, items.length);
 }
 
-const IMAGE_ROLE_LABELS = ["Vedic style","Cinematic style"];
+const IMAGE_ROLE_LABELS = ["Cinematic style","Vedic style"];
 const VIDEO_ROLE_LABELS = ["Vedic style","Cinematic style"];
 
 function buildCard(kind, it, i){
@@ -1536,40 +1591,7 @@ function buildCard(kind, it, i){
 
   const body=document.createElement("div"); body.className="card-body";
 
-  if(kind==="divine" || kind==="video"){
-    const metaBits = [];
-    if(it.day) metaBits.push(`Day: ${it.day}`);
-    if(it.date) metaBits.push(`Date: ${it.date}`);
-    if(it.best_posting_time) metaBits.push(`Best post: ${it.best_posting_time}`);
-    if(metaBits.length){
-      const metaRow = document.createElement("div"); metaRow.className="card-meta";
-      metaRow.textContent = metaBits.join(" · ");
-      body.appendChild(metaRow);
-    }
-    if(it.timings){
-      const tim = document.createElement("p"); tim.className="card-sig card-rituals";
-      tim.textContent = `Timings: ${it.timings}`;
-      body.appendChild(tim);
-    }
-    if(it.key_rituals){
-      const kr = document.createElement("p"); kr.className="card-sig card-rituals";
-      kr.textContent = `Key rituals: ${it.key_rituals}`;
-      body.appendChild(kr);
-    }
-    if(it.significance){
-      const sig = document.createElement("p"); sig.className="card-sig";
-      sig.textContent = it.significance;
-      body.appendChild(sig);
-    }
-    if(it.god_name){
-      const god = document.createElement("p"); god.className="card-sig card-rituals";
-      god.textContent = `Deity focus: ${it.god_name}${it.god_significance ? " — "+it.god_significance : ""}`;
-      body.appendChild(god);
-    }
-  }
-
-  // image_prompt / video_prompt now already include the full "Generate 4K, Cinematic
-  // Vedic Image/Video, …" prefix as written by the model — no client-side prepending needed.
+  // image_prompt / video_prompt already include the full prefix — no client-side prepending needed.
   let promptText = it[meta.promptKey] || "";
   const promptLabel = kind==="video" ? "Video prompt" : "Image prompt";
   const promptPill = kind==="video" ? "9:16 · 10s" : "1:1";
@@ -1680,6 +1702,9 @@ function wireStaticButtons(){
   document.getElementById("runMemes").addEventListener("click", ()=>runCrew("press"));
   document.getElementById("runImage").addEventListener("click", ()=>runCrew("divine"));
   document.getElementById("runVideo").addEventListener("click", ()=>runCrew("video"));
+  document.getElementById("stopMemes").addEventListener("click", ()=>stopRun("press"));
+  document.getElementById("stopImage").addEventListener("click", ()=>stopRun("divine"));
+  document.getElementById("stopVideo").addEventListener("click", ()=>stopRun("video"));
   document.getElementById("clearBtn-memes").addEventListener("click", ()=>clearWorkspace("press"));
   document.getElementById("clearBtn-divine").addEventListener("click", ()=>clearWorkspace("divine"));
   document.getElementById("fileWarningClose").addEventListener("click", ()=>{
