@@ -644,7 +644,7 @@
             <option value="gemini-3-flash-preview">3 Flash Preview — Preview · 10 RPM</option>
           </optgroup>
           <optgroup label="Gemini 2.5 · Free">
-            <option value="gemini-2.5-flash">2.5 Flash — Stable · 15 RPM · recommended ✓</option>
+            <option value="gemini-2.5-flash" selected>2.5 Flash — Stable · 15 RPM · default ✓</option>
             <option value="gemini-2.5-flash-lite">2.5 Flash Lite — Stable · 30 RPM · budget</option>
           </optgroup>
           <optgroup label="Paid only">
@@ -799,15 +799,16 @@ function setSearch(v,btn){ cfg.useSearch=v; document.querySelectorAll("#segSearc
 const LS_MODELS   = "promptlab_model_cache";
 const MODEL_TTL   = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
 
-// Updated June 2026 — grouped by generation; gemini-2.0-flash shut down 1 Jun 2026; Pro paid-only since Apr 2026
+// Curated whitelist — confirmed active June 2026. Live fetch is intersected against this list
+// so the dropdown shows only these 7 models (no TTS/Live/image/experimental noise).
 const FALLBACK_MODELS = [
-  { id:"gemini-3.1-flash-lite",  tier:"free" },  // GA — 30 RPM, best free throughput
-  { id:"gemini-3.5-flash",       tier:"free" },  // GA — 15 RPM, most intelligent free
-  { id:"gemini-3-flash-preview", tier:"free" },  // Preview — 10 RPM
-  { id:"gemini-2.5-flash",       tier:"free" },  // Stable — 15 RPM (default ✓)
-  { id:"gemini-2.5-flash-lite",  tier:"free" },  // Stable — 30 RPM, budget
-  { id:"gemini-3.1-pro-preview", tier:"paid" },  // Preview — paid only (Apr 2026+)
-  { id:"gemini-2.5-pro",         tier:"paid" },  // Stable — paid only (Apr 2026+)
+  { id:"gemini-3.1-flash-lite",  tier:"free", group:"gen3-free" }, // GA · 30 RPM · best free throughput
+  { id:"gemini-3.5-flash",       tier:"free", group:"gen3-free" }, // GA · 15 RPM · most intelligent free
+  { id:"gemini-3-flash-preview", tier:"free", group:"gen3-free" }, // Preview · 10 RPM
+  { id:"gemini-2.5-flash",       tier:"free", group:"gen2-free" }, // Stable · 15 RPM · default ✓
+  { id:"gemini-2.5-flash-lite",  tier:"free", group:"gen2-free" }, // Stable · 30 RPM · budget
+  { id:"gemini-3.1-pro-preview", tier:"paid", group:"paid"      }, // Preview · paid only (Apr 2026+)
+  { id:"gemini-2.5-pro",         tier:"paid", group:"paid"      }, // Stable  · paid only (Apr 2026+)
 ];
 
 // Per-run AbortControllers — one per kind (press / divine / video)
@@ -835,19 +836,20 @@ function buildModelSelect(models, fetchedAt){
   const sel = document.getElementById("setModel");
   const current = sel.value || cfg.model;
 
-  // Build grouped structure
-  const groups = { free:[], paid:[], other:[] };
+  // Group by the `group` field (present on whitelist models); fall back to tier for live-only models
+  const groups = { "gen3-free":[], "gen2-free":[], "paid":[], "other":[] };
   models.forEach(m => {
-    const tier = m.tier || classifyModel(m.id);
-    (groups[tier] || groups.other).push(m.id);
+    const g = m.group || (m.tier==="paid" ? "paid" : m.tier==="free" ? "gen3-free" : "other");
+    (groups[g] || groups.other).push(m.id);
   });
 
   sel.innerHTML = "";
 
   const groupDefs = [
-    { key:"free", label:"Free tier" },
-    { key:"paid", label:"Paid"      },
-    { key:"other",label:"Other"     },
+    { key:"gen3-free", label:"Gemini 3 · Free"   },
+    { key:"gen2-free", label:"Gemini 2.5 · Free" },
+    { key:"paid",      label:"Paid only"          },
+    { key:"other",     label:"Other"              },
   ];
 
   groupDefs.forEach(({ key, label }) => {
@@ -864,16 +866,18 @@ function buildModelSelect(models, fetchedAt){
     sel.appendChild(og);
   });
 
-  // Restore saved model; fall back to first free option then first available
+  // Restore saved model; fall back to gemini-2.5-flash then first free option
   const allIds = models.map(m => m.id);
-  sel.value = allIds.includes(current) ? current : (groups.free[0] || allIds[0] || "");
+  const defaultFree = groups["gen2-free"][1] || groups["gen2-free"][0] || groups["gen3-free"][0] || allIds[0] || "";
+  sel.value = allIds.includes(current) ? current : defaultFree;
 
   // Update last-updated label
   const lbl = document.getElementById("modelUpdatedLabel");
   if(fetchedAt){
     const d = new Date(fetchedAt);
     const ds = d.toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"});
-    lbl.innerHTML = `Model list updated: <b>${ds}</b> · ${models.length} models`;
+    const activeCount = models.length;
+    lbl.innerHTML = `Live model list · <b>${ds}</b> · ${activeCount} active`;
   } else {
     lbl.textContent = "Model list: built-in defaults (Jun 2026)";
   }
@@ -907,26 +911,35 @@ async function fetchModelList(isManual){
     try{ j = await res.json(); }catch(e){ throw new Error("Gemini returned non-JSON — unexpected response format"); }
 
     const raw = j.models || [];
-    const models = raw
-      .filter(m => (m.supportedGenerationMethods||[]).includes("generateContent"))
-      .filter(m => /^gemini/i.test((m.name||"").replace("models/","")))
-      .map(m => ({
-        id: (m.name||"").replace("models/",""),
-        tier: classifyModel((m.name||"").replace("models/",""))
-      }));
+    const liveIds = new Set(
+      raw
+        .filter(m => (m.supportedGenerationMethods||[]).includes("generateContent"))
+        .map(m => (m.name||"").replace("models/",""))
+    );
 
-    if(!models.length) throw new Error("API returned no generateContent-capable Gemini models — key may lack access");
+    // Intersect with whitelist — keeps only the 7 curated models (in whitelist order),
+    // confirming they are actually available on the user's key right now.
+    const models = FALLBACK_MODELS.filter(m => liveIds.has(m.id));
+    const toShow = models.length > 0 ? models : FALLBACK_MODELS; // safety: if none match, show all
+
+    if(!liveIds.size) throw new Error("API returned no generateContent-capable Gemini models — key may lack access");
 
     const now = Date.now();
     // Cache write — isolated so a storage error never kills the dropdown update
     try{
-      localStorage.setItem(LS_MODELS, JSON.stringify({ models, fetchedAt: now }));
+      localStorage.setItem(LS_MODELS, JSON.stringify({ models: toShow, fetchedAt: now }));
     }catch(storageErr){
       if(isManual) log(`Model cache not saved (storage error: ${storageErr.message}) — list will revert on next reload`, "warn");
     }
 
-    buildModelSelect(models, now);
-    if(isManual) toast(`Model list refreshed — ${models.length} models found ✓`, "ok");
+    buildModelSelect(toShow, now);
+    const unavailable = FALLBACK_MODELS.filter(m => !liveIds.has(m.id)).map(m => cleanModelName(m.id));
+    if(isManual){
+      const msg = unavailable.length
+        ? `Live list refreshed — ${toShow.length} active · ${unavailable.join(", ")} not on this key ✓`
+        : `Live list refreshed — all ${toShow.length} models active on your key ✓`;
+      toast(msg, "ok");
+    }
 
   }catch(err){
     // Try to fall back to any existing cache entry
@@ -1106,9 +1119,9 @@ const BACKOFFS = [18000, 32000, 50000];
 // Two-hop fallback chain: on rate-limit, tries these models in order (skips selected model)
 const FALLBACK_CHAIN = ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite"];
 
-async function throttleGate(){
+async function throttleGate(signal){
   const wait = _lastGemStart + MIN_GAP_MS - Date.now();
-  if(wait > 0) await sleep(wait);
+  if(wait > 0) await sleep(wait, signal);
   _lastGemStart = Date.now();
 }
 
@@ -1151,7 +1164,7 @@ async function rawGemini(prompt, useSearch, model, signal){
   const maxRetries = BACKOFFS.length;
   for(let attempt=0; ; attempt++){
     if(signal?.aborted) throw new DOMException("Aborted","AbortError");
-    await throttleGate();
+    await throttleGate(signal);
     let res;
     try{
       res = await fetch(url,{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body), signal });
@@ -1160,9 +1173,7 @@ async function rawGemini(prompt, useSearch, model, signal){
       if(attempt < maxRetries){
         const w = BACKOFFS[attempt];
         log(`Network hiccup reaching Gemini — retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
-        await sleep(w);
-        if(signal?.aborted) throw new DOMException("Aborted","AbortError");
-        continue;
+        await sleep(w, signal); continue;
       }
       throw new Error("Network error reaching Gemini — check your connection.");
     }
@@ -1181,9 +1192,7 @@ async function rawGemini(prompt, useSearch, model, signal){
       if(retryableFinish && attempt < maxRetries){
         const w = BACKOFFS[attempt];
         log(`Gemini returned empty (finishReason: ${reason||"none"}) — retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
-        await sleep(w);
-        if(signal?.aborted) throw new DOMException("Aborted","AbortError");
-        continue;
+        await sleep(w, signal); continue;
       }
 
       if(reason==="SAFETY") throw new Error("Gemini blocked this for safety — try again or rephrase the topic.");
@@ -1192,9 +1201,7 @@ async function rawGemini(prompt, useSearch, model, signal){
           const w = BACKOFFS[attempt];
           log(`Output was cut off (MAX_TOKENS) — raising limit and retrying in ${Math.round(w/1000)}s (try ${attempt+1}/${maxRetries})…`, "warn");
           body.generationConfig.maxOutputTokens = 65536;
-          await sleep(w);
-          if(signal?.aborted) throw new DOMException("Aborted","AbortError");
-          continue;
+          await sleep(w, signal); continue;
         }
       }
 
@@ -1218,9 +1225,7 @@ async function rawGemini(prompt, useSearch, model, signal){
     if(retryable && attempt < maxRetries){
       const w = Math.max(retryMs, BACKOFFS[attempt]);
       log(`${model} ${res.status===429?"rate limit":"busy ("+res.status+")"} — pausing ${Math.round(w/1000)}s, then retry ${attempt+1}/${maxRetries}…`, "warn");
-      await sleep(w);
-      if(signal?.aborted) throw new DOMException("Aborted","AbortError");
-      continue;
+      await sleep(w, signal); continue;
     }
 
     if(res.status===400 && /API key/i.test(detail)) throw new Error("Invalid Gemini API key.");
@@ -1625,7 +1630,16 @@ function fieldBlock(labelText, pillText, content, boxClass){
    UTIL
    ============================================================ */
 function esc(s){ return String(s??""); }
-function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function sleep(ms, signal){
+  return new Promise((resolve, reject) => {
+    if(signal?.aborted){ reject(new DOMException("Aborted","AbortError")); return; }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted","AbortError"));
+    }, { once:true });
+  });
+}
 
 /* ---- clear controls ---- */
 function resetLane(kind){
